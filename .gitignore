@@ -50,3 +50,10 @@ modules.order
 Module.symvers
 Mkfile.old
 dkms.conf
+.cproject
+*.project
+.settings/org.eclipse.cdt.core.prefs
+.settings/language.settings.xml
+
+Release/*
+sloeber.ino.cpp
