@@ -16,7 +16,7 @@
 
 #define PASSWORD_NAME_MAX_LEN 12
 #define PASSWORD_MAX_LEN 32  // Multiple of 16
-#define MAX_KEY_LEN 8
+#define MAX_KEY_LEN 16
 #define MAX_PASSWORD_NUM 10
 #define MAGIC_NUMBER 123
 
@@ -38,6 +38,11 @@ Adafruit_SSD1306 display(OLED_RESET);
 #define UP_BTN 3
 #define BACK_BTN 6
 
+// PASSWORD TYPE MODE
+#define GEN_BTN 1
+#define WIN_BTN 2
+#define VERIFY_BTN 5
+
 // MODES
 #define PASSWORD_SELECT_MODE 1
 #define PASSWORD_TYPING_MODE 2
@@ -53,7 +58,6 @@ uint8_t mode = PASSWORD_SELECT_MODE;
 #define GEN_TYPE_MODE 1  	// Type letters using the standard USA keyboard
 // layout. The problem is that if you use a non USA
 // keyboard, all the symbols may appear incorrectly.
-uint8_t typeMode = GEN_TYPE_MODE;
 
 // Current row in the list
 uint8_t currentRow = 0;
@@ -67,7 +71,11 @@ typedef struct {
 // Array containing the password entries
 PasswordEntry pwArray[MAX_PASSWORD_NUM];
 int pwLen = 0;
-uint8_t validKeyChars[] = { 1, 2, 3, 4, 5 };
+int selectedEntry = -1;
+uint8_t currentKey[MAX_KEY_LEN];
+uint8_t keyIndex = 0;
+int8_t isKeyValid = -1;
+char currentPass[PASSWORD_MAX_LEN];
 
 //The setup function is called once at startup of the sketch
 void setup() {
@@ -121,6 +129,9 @@ void setup() {
 
 	Serial.print("Passwordino v");
 	Serial.println(PASSWORDINO_VERSION);
+
+	Keyboard.begin();
+
 	Serial.println("Loading EEPROM...");
 
 	loadPasswordsFromEEPROM();
@@ -155,6 +166,9 @@ void renderDisplay() {
 	switch (mode) {
 	case PASSWORD_SELECT_MODE:
 		renderPasswordList();
+		break;
+	case PASSWORD_TYPING_MODE:
+		renderPasswordTypeMode();
 		break;
 	case SERIAL_MODE:
 		renderSerialMode();
@@ -212,14 +226,58 @@ void renderPasswordList() {
 
 void renderSerialMode() {
 	display.clearDisplay();
-	display.setTextSize(2);
+	display.setTextSize(1);
 	display.setTextColor(WHITE);
 	display.setCursor(0, 0);
 
 	display.println("SERIAL MODE");
-	display.setTextSize(1);
 	display.print("BAUD: ");
 	display.println(BAUD_RATE);
+
+	display.display();
+}
+
+void renderPasswordTypeMode() {
+	display.clearDisplay();
+	display.setTextSize(1);
+	display.setTextColor(WHITE);
+	display.setCursor(0, 0);
+
+	if (selectedEntry < 0) {
+		return;
+	}
+
+	display.print("-> ");
+	display.println(pwArray[selectedEntry].name);
+
+	if (pwArray[selectedEntry].encrypted && isKeyValid != 1) {
+		display.println("Type the key:");
+		display.print("PW [");
+		for (int i = 0; i < MAX_KEY_LEN; i++) {
+			if (currentKey[i] == 0) {
+				display.print(' ');
+			} else {
+				display.print('*');
+			}
+		}
+		display.println(']');
+	}
+
+	if (isKeyValid < 0) {
+		display.println();
+	}else if (isKeyValid == 1) {
+		display.print('[');
+		display.print(GEN_BTN);
+		display.print(']');
+		display.print(" TYPE ");
+
+		display.print('[');
+		display.print(WIN_BTN);
+		display.print(']');
+		display.println(" WTYPE ");
+	}else{
+		display.println("WRONG!");
+	}
 
 	display.display();
 }
@@ -263,7 +321,7 @@ int findFreeIndexInEEPROM() {
 }
 
 int writePasswordToEEPROM(char *name, char *pass, uint8_t isEncrypted,
-		uint8_t key[], uint8_t keyLen) {
+		uint8_t key[]) {
 	int freeIndex = findFreeIndexInEEPROM();
 
 	if (freeIndex < 0) {
@@ -297,7 +355,11 @@ int writePasswordToEEPROM(char *name, char *pass, uint8_t isEncrypted,
 void clearEEPROM() {
 	for (int i = 0; i < EEPROM.length(); i++) {
 		EEPROM.write(i, 0);
+		if (i % 10 == 0) {
+			Serial.print('.');
+		}
 	}
+	Serial.print('\n');
 }
 
 void handleBtnPress(uint8_t value) {
@@ -323,13 +385,47 @@ void handleBtnPress(uint8_t value) {
 			break;
 		}
 		break;
+	case PASSWORD_TYPING_MODE:
+		switch (value) {
+		case BACK_BTN:
+			mode = PASSWORD_SELECT_MODE;
+			break;
+		case VERIFY_BTN:
+			verifyKey();
+			break;
+		default:
+			if (isKeyValid == 1) {
+				switch(value) {
+				case GEN_BTN:
+					typePassword(GEN_TYPE_MODE);
+					break;
+				case WIN_BTN:
+					typePassword(WIN_TYPE_MODE);
+					break;
+				}
+			}else{
+				// Add the key to the buffer
+				if (keyIndex < MAX_KEY_LEN) {
+					currentKey[keyIndex] = value;
+					keyIndex++;
+				}
+			}
+		}
+		break;
 	}
 
 }
 
 void handlePasswordSelect() {
-	PasswordEntry current = pwArray[currentRow];
-
+	selectedEntry = currentRow;
+	memset(currentKey, 0, MAX_KEY_LEN);
+	keyIndex = 0;
+	mode = PASSWORD_TYPING_MODE;
+	if (pwArray[selectedEntry].encrypted) {
+		isKeyValid = -1;
+	}else{
+		isKeyValid = 1;
+	}
 }
 
 void handleSerial() {
@@ -359,7 +455,7 @@ void handleSerial() {
 		String code = Serial.readStringUntil('\n');
 
 		if (code.length() == 0) {  // Not encrypted
-			if (!writePasswordToEEPROM(cname, cpass, 0, NULL, 0)) {
+			if (!writePasswordToEEPROM(cname, cpass, 0, NULL)) {
 				Serial.println("Can't save password!");
 				return;
 			}
@@ -368,10 +464,17 @@ void handleSerial() {
 			return;
 		} else {  // Encrypted
 			uint8_t keys[MAX_KEY_LEN];
+			memset(keys, 0 , MAX_KEY_LEN);
 			for (int i = 0; i < code.length(); i++) {
-				keys[i] = atoi(code.charAt(i));
+				keys[i] = code.charAt(i) - '0';
 			}
-			if (!writePasswordToEEPROM(cname, cpass, 1, keys, code.length())) {
+
+			for (int i = 0; i< MAX_KEY_LEN; i++) {
+				Serial.print(keys[i]);
+				Serial.print(',');
+			}
+
+			if (!writePasswordToEEPROM(cname, cpass, 1, keys)) {
 				Serial.println("Can't save password!");
 				return;
 			}
@@ -396,14 +499,71 @@ void handleSerial() {
 	}
 }
 
-void switchTypeMode() {
+void verifyKey() {
+	char decryptedPass[PASSWORD_MAX_LEN];
+	strcpy(decryptedPass, pwArray[selectedEntry].pass);
+
+	aes128_dec_single(currentKey, &decryptedPass[0]);
+	aes128_dec_single(currentKey, &decryptedPass[16]);
+
+	if (strncmp(decryptedPass, "OK", 2)== 0) {
+		isKeyValid = 1;
+		strcpy(currentPass, &decryptedPass[2]);  // Remove the initial OK
+	}else{
+		isKeyValid = 0;
+		// Reset the key
+		memset(currentKey, 0, MAX_KEY_LEN);
+		keyIndex = 0;
+	}
+
+
+}
+
+void typePassword(uint8_t typeMode) {
+	String pass;
+	if (pwArray[selectedEntry].encrypted) {
+		pass = String(currentPass);
+	}else{
+		pass= String(pwArray[selectedEntry].pass);
+	}
+
 	switch (typeMode) {
 	case WIN_TYPE_MODE:
-		typeMode = GEN_TYPE_MODE;
+		sendKeysWinMode(pass);
 		break;
 	case GEN_TYPE_MODE:
-		typeMode = WIN_TYPE_MODE;
+		Keyboard.print(pass);
 		break;
+	}
+}
+
+void sendKeysWinMode(String text) {
+	int len = text.length();
+	int current;
+	char digit;
+	int offset;
+
+	for (int i = 0; i < len; i++) {
+
+		current = (int) text.charAt(i);
+
+		String ascii = String(current);
+
+		Keyboard.press(KEY_LEFT_ALT);
+
+		//delay(1);
+		for (int j = 0; j < ascii.length(); j++) {
+			digit = ascii.charAt(j);
+			offset = digit - '0';
+			if (offset == 0) {
+				Keyboard.write(234);
+			} else {
+				Keyboard.write(224 + offset);
+			}
+			//delay(1);
+		}
+
+		Keyboard.release(KEY_LEFT_ALT);
 	}
 }
 
